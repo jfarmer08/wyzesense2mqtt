@@ -1,6 +1,6 @@
 FROM docker.io/python:alpine
 
-LABEL maintainer="Raetha"
+LABEL maintainer="jfarmer08"
 
 COPY wyzesense2mqtt /app/
 

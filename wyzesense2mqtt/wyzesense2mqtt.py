@@ -777,6 +777,69 @@ def Stop():
     LOGGER.info("********************************** Wyzesense2mqtt stopped ***********************************")
 
 
+def send_action_buttons_discovery():
+    """
+    Publishes MQTT Discovery configs for Home Assistant buttons:
+    - Scan: Triggers sensor scan (publish blank to scan topic)
+    - Remove: Removes a sensor (publish MAC to remove topic)
+    - Reload: Reloads sensors.yaml (publish blank to reload topic)
+    These buttons will appear in Home Assistant if MQTT Discovery is enabled.
+    """
+    global CONFIG
+
+    # Scan Button
+    scan_button_topic = f"{CONFIG['hass_topic_root']}/button/wyzesense2mqtt_scan/config"
+    scan_payload = {
+        "name": "WyzeSense Scan",
+        "unique_id": "wyzesense2mqtt_scan",
+        "command_topic": f"{CONFIG['self_topic_root']}/scan",
+        "payload_press": "",
+        "device": {
+            "identifiers": ["wyzesense2mqtt_gateway"],
+            "manufacturer": "Wyze",
+            "model": "WyzeSense2MQTT Gateway",
+            "name": "WyzeSense2MQTT Gateway"
+        },
+        "entity_category": "config",
+        "platform": "mqtt"
+    }
+    mqtt_publish(scan_button_topic, scan_payload)
+
+    # Remove Button (send MAC as payload)
+    remove_button_topic = f"{CONFIG['hass_topic_root']}/button/wyzesense2mqtt_remove/config"
+    remove_payload = {
+        "name": "WyzeSense Remove (send MAC as payload)",
+        "unique_id": "wyzesense2mqtt_remove",
+        "command_topic": f"{CONFIG['self_topic_root']}/remove",
+        "device": {
+            "identifiers": ["wyzesense2mqtt_gateway"],
+            "manufacturer": "Wyze",
+            "model": "WyzeSense2MQTT Gateway",
+            "name": "WyzeSense2MQTT Gateway"
+        },
+        "entity_category": "config",
+        "platform": "mqtt"
+    }
+    mqtt_publish(remove_button_topic, remove_payload)
+
+    # Reload Button
+    reload_button_topic = f"{CONFIG['hass_topic_root']}/button/wyzesense2mqtt_reload/config"
+    reload_payload = {
+        "name": "WyzeSense Reload",
+        "unique_id": "wyzesense2mqtt_reload",
+        "command_topic": f"{CONFIG['self_topic_root']}/reload",
+        "payload_press": "",
+        "device": {
+            "identifiers": ["wyzesense2mqtt_gateway"],
+            "manufacturer": "Wyze",
+            "model": "WyzeSense2MQTT Gateway",
+            "name": "WyzeSense2MQTT Gateway"
+        },
+        "entity_category": "config",
+        "platform": "mqtt"
+    }
+    mqtt_publish(reload_button_topic, reload_payload)
+
 if __name__ == "__main__":
     # Initialize logging
     init_logging()
@@ -802,6 +865,10 @@ if __name__ == "__main__":
 
     # All initialized now, so set the flag to allow message event to be processed
     INITIALIZED = True
+
+    # Publish MQTT buttons for Home Assistant
+    if CONFIG.get('hass_discovery', True):
+        send_action_buttons_discovery()
 
     # And mark the service as online
     mqtt_publish(f"{CONFIG['self_topic_root']}/status", "online", is_json=False)

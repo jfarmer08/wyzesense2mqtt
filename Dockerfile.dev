@@ -1,0 +1,32 @@
+FROM python:3.11-alpine
+
+LABEL maintainer="Raetha"
+
+WORKDIR /app
+
+# Install dev tools and dependencies
+RUN apk add --no-cache tzdata dos2unix bash vim \
+    && pip3 install --no-cache-dir --upgrade pip
+
+# Copy source code and entrypoint script
+COPY wyzesense2mqtt /app/
+COPY wyzesense2mqtt/service.sh /app/service.sh
+
+# Fix line endings and permissions for service.sh
+RUN dos2unix /app/service.sh \
+    && chmod +x /app/service.sh
+
+# Install Python dependencies
+RUN pip3 install --no-cache-dir -r /app/requirements.txt
+
+# Set up non-root user
+RUN adduser -D -u 1000 appuser \
+    && chown -R appuser:appuser /app
+
+USER appuser
+
+VOLUME ["/app/config", "/app/logs"]
+
+ENTRYPOINT ["/app/service.sh"]
+
+CMD ["/bin/sh"]
