@@ -646,270 +646,54 @@ def on_message(MQTT_CLIENT, userdata, msg):
 # Process message to scan for new sensors
 def on_message_scan(MQTT_CLIENT, userdata, msg):
     global SENSORS, CONFIG
-    result = None
-    LOGGER.info(f"In on_message_scan: {msg.payload.decode()}")
-
-    # The scan will do a couple additional calls even after the new sensor is found
-    # These calls may time out, so catch it early so we can still add the sensor properly
+    payload = msg.payload.decode()
+    LOGGER.info(f"[MQTT] SCAN requested (topic: {msg.topic}, payload: '{payload}')")
     try:
         result = WYZESENSE_DONGLE.Scan()
-    except TimeoutError:
-        pass
-
-    if (result):
-        LOGGER.info(f"Scan result: {result}")
-        sensor_mac, sensor_type, sensor_version = result
-        if (valid_sensor_mac(sensor_mac)):
-            if (SENSORS.get(sensor_mac)) is None:
-                add_sensor_to_config(sensor_mac, sensor_type, sensor_version)
-                if(CONFIG['hass_discovery']):
-                    # We are in a mqtt callback, so can not wait for new messages to publish
-                    send_discovery_topics(sensor_mac, wait=False)
+        if result:
+            sensor_mac, sensor_type, sensor_version = result
+            LOGGER.info(f"[SCAN] Found sensor: MAC={sensor_mac}, type={sensor_type}, version={sensor_version}")
+            if valid_sensor_mac(sensor_mac):
+                if SENSORS.get(sensor_mac) is None:
+                    LOGGER.info(f"[SCAN] Adding new sensor to config: {sensor_mac}")
+                    add_sensor_to_config(sensor_mac, sensor_type, sensor_version)
+                    if CONFIG['hass_discovery']:
+                        send_discovery_topics(sensor_mac, wait=False)
+                else:
+                    LOGGER.info(f"[SCAN] Sensor {sensor_mac} already exists in config")
+            else:
+                LOGGER.warning(f"[SCAN] Invalid sensor MAC found: {sensor_mac}")
         else:
-            LOGGER.info(f"Invalid sensor found: {sensor_mac}")
-    else:
-        LOGGER.info("No new sensor found")
+            LOGGER.info("[SCAN] No new sensor found during scan")
+    except TimeoutError:
+        LOGGER.error("[SCAN] Scan timed out")
+    except Exception as e:
+        LOGGER.error(f"[SCAN] Unexpected error: {e}", exc_info=True)
 
-
-# Process message to remove sensor
 def on_message_remove(MQTT_CLIENT, userdata, msg):
     sensor_mac = msg.payload.decode()
-    LOGGER.info(f"In on_message_remove: {sensor_mac}")
-
-    if (valid_sensor_mac(sensor_mac)):
-        # Deleting from the dongle may timeout, but we still need to do
-        # the rest so catch it early
+    LOGGER.info(f"[MQTT] REMOVE requested (topic: {msg.topic}, payload: '{sensor_mac}')")
+    if valid_sensor_mac(sensor_mac):
         try:
             WYZESENSE_DONGLE.Delete(sensor_mac)
+            LOGGER.info(f"[REMOVE] Sensor {sensor_mac} removed from dongle")
         except TimeoutError:
-            pass
-        # We are in a mqtt callback so cannot wait for new messages to publish
+            LOGGER.error(f"[REMOVE] Remove timed out for {sensor_mac}")
+        except Exception as e:
+            LOGGER.error(f"[REMOVE] Unexpected error removing {sensor_mac}: {e}", exc_info=True)
         clear_topics(sensor_mac, wait=False)
         delete_sensor_from_config(sensor_mac)
+        LOGGER.info(f"[REMOVE] Sensor {sensor_mac} removed from config and MQTT topics cleared")
     else:
-        LOGGER.info(f"Invalid mac address: {sensor_mac}")
+        LOGGER.warning(f"[REMOVE] Invalid MAC address for removal: {sensor_mac}")
 
-
-# Process message to reload sensors
 def on_message_reload(MQTT_CLIENT, userdata, msg):
-    LOGGER.info(f"In on_message_reload: {msg.payload.decode()}")
-
-    # Save off the last known state so we don't overwrite new state by re-reading the previously saved file
-    LOGGER.info("Writing Sensors State File")
-    write_yaml_file(os.path.join(CONFIG_PATH, SENSORS_STATE_FILE), SENSORS_STATE)
-
-    # We are in a mqtt callback so cannot wait for new messages to publish
-    init_sensors(wait=False)
-
-
-# Process event
-def on_event(WYZESENSE_DONGLE, event):
-    global SENSORS, SENSORS_STATE
-
-    if not INITIALIZED:
-        return
-
-    LOGGER.info(f"State event data: {event}")
-    if not valid_sensor_mac(event.mac):
-        LOGGER.warning(f"!Invalid MAC detected")
-        return
-
-    if (valid_sensor_mac(event.mac)):
-        if (event.mac not in SENSORS):
-            add_sensor_to_config(event.mac, event.sensor_type)
-            if(CONFIG['hass_discovery']):
-                send_discovery_topics(event.mac)
-            LOGGER.warning(f"Linked sensor with mac {event.mac} automatically added to sensors configuration")
-            LOGGER.warning(f"Please update sensor configuration file {os.path.join(CONFIG_PATH, SENSORS_CONFIG_FILE)} restart the service/reload the sensors")
-            s = SENSORS[event.mac]
-        else:
-            s = SENSORS[event.mac]
-            old_type = s.get('sensor_type', 'unknown')
-            if event.sensor_type != old_type:
-                LOGGER.info("Updating Sensors Config File")
-                s['sensor_type'] = event.sensor_type
-                write_yaml_file(os.path.join(CONFIG_PATH, SENSORS_CONFIG_FILE), SENSORS)
-                if(CONFIG['hass_discovery']):
-                    send_discovery_topics(event.mac)
-                LOGGER.warning(f"Linked sensor with mac {event.mac} automatically added to sensors configuration")
-                LOGGER.warning(f"Please update sensor configuration file {os.path.join(CONFIG_PATH, SENSORS_CONFIG_FILE)} restart the service/reload the sensors")
-
-        # Store last seen time for availability
-        SENSORS_STATE[event.mac]['last_seen'] = event.timestamp
-
-        mqtt_publish(f"{CONFIG['self_topic_root']}/{event.mac}/status", "online", is_json=False)
-
-        # Set back online if it was offline
-        if not SENSORS_STATE[event.mac]['online']:
-            SENSORS_STATE[event.mac]['online'] = True
-            LOGGER.info(f"{event.mac} is back online!")
-
-        if event.event not in ("alarm", "status"):
-            LOGGER.info(f"Unknown event: {e}")
-            return
-
-        payload = {}
-        payload.update(s)
-        payload.update(vars(event))
-
-        LOGGER.info(f"{CONFIG['self_topic_root']}/{event.mac}")
-        LOGGER.info(payload)
-        mqtt_publish(f"{CONFIG['self_topic_root']}/{event.mac}", payload)
-    else:
-        LOGGER.warning("!Invalid MAC detected!")
-        LOGGER.warning(f"Event data: {event}")
-
-def Stop():
-    # Stop the dongle first, letting this thread finish anything it might be busy doing, like handling an event
-    WYZESENSE_DONGLE.Stop()
-
-    mqtt_publish(f"{CONFIG['self_topic_root']}/status", "offline", is_json=False)
-
-    # All event handling should now be done, close the mqtt connection
-    MQTT_CLIENT.loop_stop()
-    MQTT_CLIENT.disconnect()
-
-    # Save off the last known state
-    LOGGER.info("Writing Sensors State File")
-    SENSORS_STATE['modified'] = time.time()
-    write_yaml_file(os.path.join(CONFIG_PATH, SENSORS_STATE_FILE), SENSORS_STATE)
-
-    LOGGER.info("********************************** Wyzesense2mqtt stopped ***********************************")
-
-
-def send_action_buttons_discovery():
-    """
-    Publishes MQTT Discovery configs for Home Assistant buttons:
-    - Scan: Triggers sensor scan (publish blank to scan topic)
-    - Remove: Removes a sensor (publish MAC to remove topic)
-    - Reload: Reloads sensors.yaml (publish blank to reload topic)
-    These buttons will appear in Home Assistant if MQTT Discovery is enabled.
-    """
-    global CONFIG
-
-    # Scan Button
-    scan_button_topic = f"{CONFIG['hass_topic_root']}/button/wyzesense2mqtt_scan/config"
-    scan_payload = {
-        "name": "WyzeSense Scan",
-        "unique_id": "wyzesense2mqtt_scan",
-        "command_topic": f"{CONFIG['self_topic_root']}/scan",
-        "payload_press": "",
-        "device": {
-            "identifiers": ["wyzesense2mqtt_gateway"],
-            "manufacturer": "Wyze",
-            "model": "WyzeSense2MQTT Gateway",
-            "name": "WyzeSense2MQTT Gateway"
-        },
-        "entity_category": "config",
-        "platform": "mqtt"
-    }
-    mqtt_publish(scan_button_topic, scan_payload)
-
-    # Remove Button (send MAC as payload)
-    remove_button_topic = f"{CONFIG['hass_topic_root']}/button/wyzesense2mqtt_remove/config"
-    remove_payload = {
-        "name": "WyzeSense Remove (send MAC as payload)",
-        "unique_id": "wyzesense2mqtt_remove",
-        "command_topic": f"{CONFIG['self_topic_root']}/remove",
-        "device": {
-            "identifiers": ["wyzesense2mqtt_gateway"],
-            "manufacturer": "Wyze",
-            "model": "WyzeSense2MQTT Gateway",
-            "name": "WyzeSense2MQTT Gateway"
-        },
-        "entity_category": "config",
-        "platform": "mqtt"
-    }
-    mqtt_publish(remove_button_topic, remove_payload)
-
-    # Reload Button
-    reload_button_topic = f"{CONFIG['hass_topic_root']}/button/wyzesense2mqtt_reload/config"
-    reload_payload = {
-        "name": "WyzeSense Reload",
-        "unique_id": "wyzesense2mqtt_reload",
-        "command_topic": f"{CONFIG['self_topic_root']}/reload",
-        "payload_press": "",
-        "device": {
-            "identifiers": ["wyzesense2mqtt_gateway"],
-            "manufacturer": "Wyze",
-            "model": "WyzeSense2MQTT Gateway",
-            "name": "WyzeSense2MQTT Gateway"
-        },
-        "entity_category": "config",
-        "platform": "mqtt"
-    }
-    mqtt_publish(reload_button_topic, reload_payload)
-
-if __name__ == "__main__":
-    # Initialize logging
-    init_logging()
-
-    print("********************************** Wyzesense2mqtt starting **********************************")
-
-    # Initialize configuration
-    init_config()
-
-    # Set MQTT Topics
-    SCAN_TOPIC = f"{CONFIG['self_topic_root']}/scan"
-    REMOVE_TOPIC = f"{CONFIG['self_topic_root']}/remove"
-    RELOAD_TOPIC = f"{CONFIG['self_topic_root']}/reload"
-
-    # Initialize MQTT client connection
-    init_mqtt_client()
-
-    # Initialize USB dongle
-    init_wyzesense_dongle()
-
-    # Initialize sensor configuration
-    init_sensors()
-
-    # All initialized now, so set the flag to allow message event to be processed
-    INITIALIZED = True
-
-    # Publish MQTT buttons for Home Assistant
-    if CONFIG.get('hass_discovery', True):
-        send_action_buttons_discovery()
-
-    # And mark the service as online
-    mqtt_publish(f"{CONFIG['self_topic_root']}/status", "online", is_json=False)
-
-    # Loop forever until keyboard interrupt or SIGINT
+    payload = msg.payload.decode()
+    LOGGER.info(f"[MQTT] RELOAD requested (topic: {msg.topic}, payload: '{payload}')")
     try:
-        while True:
-            time.sleep(5)
-            # Check if there is any exceptions in the dongle thread
-            WYZESENSE_DONGLE.CheckError()
-
-            if not MQTT_CLIENT.connected_flag:
-                LOGGER.warning("Reconnecting MQTT...")
-                MQTT_CLIENT.reconnect()
-
-            if MQTT_CLIENT.connected_flag:
-                mqtt_publish(f"{CONFIG['self_topic_root']}/status", "online", is_json=False)
-
-
-            # Check for availability of the devices
-            now = time.time()
-            for mac in SENSORS_STATE:
-                if SENSORS_STATE[mac]['online']:
-                    LOGGER.debug(f"Checking availability of {mac}")
-                    
-                    sensor = SENSORS[mac]
-                    
-                    sensor_type = sensor.get('sensor_type', 'unknown')
-                    # First the sensor type to decide the timeout value
-                    timeout = _DEVICE_MAPPING[sensor_type]['timeout'] * 60 * 60
-
-                    # Then check if the device has its own timeout value
-                    timeout = sensor.get('timeout', timeout)
-
-                    if ((now - SENSORS_STATE[mac]['last_seen']) > timeout):
-                        mqtt_publish(f"{CONFIG['self_topic_root']}/{mac}/status", "offline", is_json=False)
-                        LOGGER.warning(f"{mac} has gone offline!")
-                        SENSORS_STATE[mac]['online'] = False
-    except KeyboardInterrupt:
-        LOGGER.warning("User interrupted")
+        LOGGER.info("[RELOAD] Writing sensors state file before reload")
+        write_yaml_file(os.path.join(CONFIG_PATH, SENSORS_STATE_FILE), SENSORS_STATE)
+        init_sensors(wait=False)
+        LOGGER.info("[RELOAD] Sensors configuration reloaded successfully")
     except Exception as e:
-        LOGGER.error("An error occurred", exc_info=True)
-    finally:
-        Stop()
+        LOGGER.error(f"[RELOAD] Error during reload: {e}", exc_info=True)
